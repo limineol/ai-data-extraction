@@ -362,6 +362,20 @@ class PortableTests(unittest.TestCase):
         (sessions / 'project').symlink_to(target, target_is_directory=True)
         self.assertEqual(len(discover(self.home, {})), 1)
 
+    def test_missing_history_remains_visible_across_repeated_runs(self):
+        from harness_sources import COMMANDS
+        path = self.jsonl('.grok/sessions/project/session/chat_history.jsonl', [{'type': 'user', 'content': 'hello'}])
+        self.jsonl('.pi/agent/sessions/one.jsonl', [{'type': 'message', 'message': {'role': 'user', 'content': 'pi'}}])
+        with patch('extract_portable.installed', return_value={name: [] for name in COMMANDS}), patch('builtins.print'):
+            first = run(self.output, self.home, {})
+            self.assertEqual(first['missing_history'], [])
+            path.unlink()
+            second = run(self.output, self.home, {})
+            third = run(self.output, self.home, {})
+        self.assertEqual(second['missing_history'], ['grok'])
+        self.assertEqual(third['missing_history'], ['grok'])
+        self.assertEqual(third['status'], 'partial')
+
 
 if __name__ == '__main__':
     unittest.main()

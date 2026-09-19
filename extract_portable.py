@@ -131,9 +131,13 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
     output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output_root, 0o700)
     previous = {}
+    expected_harnesses = set()
     if (output_root / 'latest.json').exists():
         previous_run = json.loads((output_root / 'latest.json').read_text())['run']
-        previous = json.loads((Path(previous_run) / 'manifest.json').read_text()).get('coverage', {})
+        previous_manifest = json.loads((Path(previous_run) / 'manifest.json').read_text())
+        previous = previous_manifest.get('coverage', {})
+        expected_harnesses.update(previous_manifest.get('expected_harnesses', []))
+        expected_harnesses.update(name for name, coverage in previous.items() if coverage.get('messages', 0) > 0)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     output = output_root / stamp
     output.mkdir(mode=0o700)
@@ -167,9 +171,10 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
                                     'conversations': sum(r.get('conversations', 0) for r in results),
                                     'messages': sum(r.get('messages', 0) for r in results)}
         print(name + ': ' + json.dumps(report['coverage'][name]), flush=True)
-    report['missing_history'] = [name for name, coverage in previous.items()
-                                 if name in report['coverage'] and coverage.get('messages', 0) > 0
-                                 and report['coverage'][name]['messages'] == 0]
+    expected_harnesses.update(name for name, coverage in report['coverage'].items() if coverage['messages'] > 0)
+    report['expected_harnesses'] = sorted(expected_harnesses)
+    report['missing_history'] = sorted(name for name in expected_harnesses
+                                       if name in report['coverage'] and report['coverage'][name]['messages'] == 0)
     report['status'] = ('no_sources' if not sources else 'partial' if report['missing_history'] or
                         any(r['status'] in ['error', 'partial', 'archive_only'] for r in report['sources']) else
                         'verified_with_empty_stores' if any(r['status'] == 'no_messages' for r in report['sources']) else 'verified')
