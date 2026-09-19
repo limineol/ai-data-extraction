@@ -12,6 +12,7 @@ content-addressed blob store:
 Walking refs from latestRootBlobId reconstructs messages in order.
 """
 import json
+import os
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
@@ -25,49 +26,85 @@ def find_chat_roots():
 
 
 def parse_ref_list(data):
-    """Parse a protobuf-framed tree node into ordered 32-byte blob-id refs."""
+    """Read top-level protobuf references; raw source-code blobs are leaves."""
+    if isinstance(data, str):
+        data = data.encode('utf-8')
     refs = []
-    i = 0
-    n = len(data)
-    while i < n - 1:
-        if data[i] == 0x0A and data[i + 1] == 0x20 and i + 34 <= n:
-            refs.append(data[i + 2:i + 34].hex())
-            i += 34
-        else:
-            i += 1
+    offset = 0
+
+    def varint():
+        nonlocal offset
+        value = 0
+        for shift in range(0, 70, 7):
+            if offset >= len(data):
+                raise ValueError('Truncated varint')
+            byte = data[offset]
+            offset += 1
+            value |= (byte & 127) << shift
+            if not byte & 128:
+                return value
+        raise ValueError('Invalid varint')
+
+    try:
+        while offset < len(data):
+            tag = varint()
+            field, wire = tag >> 3, tag & 7
+            if field == 0:
+                raise ValueError('Invalid protobuf frame')
+            if wire == 0:
+                varint()
+            elif wire in (1, 5):
+                offset += 8 if wire == 1 else 4
+            elif wire == 2:
+                size = varint()
+                if field == 1 and size == 32:
+                    refs.append(data[offset:offset + size].hex())
+                offset += size
+            else:
+                raise ValueError('Invalid protobuf frame')
+            if offset > len(data):
+                raise ValueError('Invalid protobuf frame')
+    except ValueError:
+        raise
     return refs
 
 
 def resolve_messages(conn, root_id):
-    """Depth-first flatten from root_id into ordered message dicts."""
     messages = []
-    visited = set()
-
-    def walk(bid):
-        if bid in visited:
-            return
-        visited.add(bid)
+    pending = [(root_id, frozenset())]
+    while pending:
+        bid, ancestors = pending.pop()
+        if bid in ancestors:
+            raise ValueError('Cycle in Cursor reference tree')
         row = conn.execute('SELECT data FROM blobs WHERE id=?', (bid,)).fetchone()
         if not row:
-            return
+            raise ValueError('Missing referenced Cursor blob: ' + bid)
         data = row[0]
-        # Try JSON message blob first
         try:
             obj = json.loads(data)
             if isinstance(obj, dict) and 'role' in obj:
                 messages.append(obj)
-                return
+                continue
         except (ValueError, UnicodeDecodeError):
             pass
-        # Otherwise treat as a tree node: recurse into referenced children
-        for ref in parse_ref_list(data):
-            walk(ref)
-
-    walk(root_id)
+        try:
+            refs = parse_ref_list(data)
+        except ValueError:
+            try:
+                text = data if isinstance(data, str) else data.decode('utf-8')
+                is_text = all(character.isprintable() or character in '\n\r\t' for character in text)
+            except UnicodeDecodeError:
+                is_text = False
+            if bid == root_id or not is_text:
+                raise
+            refs = []
+        pending.extend((ref, ancestors | {bid}) for ref in reversed(refs))
     return messages
 
 
 def load_meta(conn):
+    if conn.execute('SELECT COUNT(*) FROM meta').fetchone()[0] > 1:
+        raise ValueError('Ambiguous Cursor metadata rows')
     row = conn.execute('SELECT value FROM meta LIMIT 1').fetchone()
     if not row:
         return {}
@@ -116,6 +153,7 @@ def extract_store(db_path, chat_id):
 
 
 def main():
+    os.umask(0o077)
     print('=' * 80)
     print('CURSOR-AGENT CLI EXTRACTION (~/.cursor/chats)')
     print('=' * 80)
