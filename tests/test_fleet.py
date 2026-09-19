@@ -88,6 +88,55 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(report['status'], 'needs_attention')
         self.assertTrue(report['hosts']['forge']['backup_complete'])
 
+    def test_old_collected_snapshot_is_rejected(self):
+        self.manifest['created_at'] = '20000101T000000.000000Z'
+        self.write_manifest()
+        with self.assertRaises(ValueError):
+            self.fleet.verify_snapshot(self.root, max_age_hours=24)
+
+    def test_worker_does_not_reuse_old_result_after_noop_extraction(self):
+        import subprocess
+        root = self.root / '.local/share/ai-data-extraction/backups'
+        root.mkdir(parents=True)
+        (root / 'latest.json').write_text('{"run":"unchanged"}')
+        with patch('backup_fleet.Path.home', return_value=self.root), \
+                patch('backup_fleet.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaises(RuntimeError):
+                self.fleet.worker(False, False)
+
+    def test_ssh_noise_is_ignored_and_scp_uses_literal_arguments(self):
+        import subprocess
+        destination = self.root / 'copied'
+        payload = {'run': '/home/user/backups/run-1', 'reused_existing_snapshot': False}
+        result = subprocess.CompletedProcess([], 0, 'startup notice\n' + self.fleet.RESULT_PREFIX + json.dumps(payload) + '\n')
+        with patch('backup_fleet.subprocess.run', side_effect=[result, subprocess.CompletedProcess([], 0)]) as execute, \
+                patch('backup_fleet.verify_snapshot', return_value={'backup_complete': True}), \
+                (self.root / 'test.log').open('w') as log:
+            self.fleet.collect_host('vector', destination, False, False, log)
+        ssh_command = execute.call_args_list[0].args[0]
+        scp_command = execute.call_args_list[1].args[0]
+        self.assertEqual(ssh_command[-3:-1], ['--', 'vector'])
+        self.assertEqual(scp_command[-3:], ['--', 'vector:/home/user/backups/run-1', str(destination)])
+        self.assertNotIn('StrictHostKeyChecking=no', ssh_command)
+
+    def test_unsafe_remote_path_is_rejected_before_scp(self):
+        import subprocess
+        payload = {'run': '/home/user/backup;echo-bad', 'reused_existing_snapshot': False}
+        result = subprocess.CompletedProcess([], 0, self.fleet.RESULT_PREFIX + json.dumps(payload))
+        with patch('backup_fleet.subprocess.run', return_value=result) as execute, (self.root / 'test.log').open('w') as log:
+            with self.assertRaises(ValueError):
+                self.fleet.collect_host('vector', self.root / 'copied', False, False, log)
+        self.assertEqual(execute.call_count, 1)
+
+    def test_fleet_cleanup_warnings_remain_successful_backups(self):
+        output = self.root / 'sets'
+        with patch('sys.argv', ['backup_fleet.py', '--output', str(output)]), \
+                patch('backup_fleet.collect_host', return_value={'backup_complete': True, 'cleanup_status': 'incomplete'}), \
+                patch('builtins.print'):
+            self.assertEqual(self.fleet.main(), 0)
+        latest = json.loads((output / 'latest.json').read_text())
+        self.assertEqual(latest['status'], 'completed_with_cleanup_warnings')
+
 
 if __name__ == '__main__':
     unittest.main()

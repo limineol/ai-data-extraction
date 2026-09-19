@@ -91,8 +91,9 @@ To collect already completed initial snapshots without extracting again:
 python3 backup_fleet.py --host vector --host forge --allow-archive-only --collect-latest
 ```
 
-The report explicitly records that snapshots were reused and their original
-timestamps. Do not put `--collect-latest` in the monthly schedule.
+Existing snapshots must be no more than 24 hours old; a clock more than 30
+minutes ahead is rejected. The report explicitly records that snapshots were
+reused and their original timestamps. Do not put `--collect-latest` in the monthly schedule.
 
 Install **one** cron entry on Nexus, with absolute paths to Python and the checkout:
 

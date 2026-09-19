@@ -16,6 +16,8 @@ from pathlib import Path
 from extract_portable import write_json
 from harness_sources import COMMANDS
 
+RESULT_PREFIX = 'AI_BACKUP_RESULT='
+
 SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15',
                '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3']
 
@@ -45,8 +47,13 @@ def worker(collect_latest, allow_archive_only):
     return {'run': str(latest_run(root)), 'reused_existing_snapshot': collect_latest}
 
 
-def verify_snapshot(directory, allow_archive_only=False):
+def verify_snapshot(directory, allow_archive_only=False, max_age_hours=None):
     manifest = json.loads((directory / 'manifest.json').read_text())
+    if max_age_hours is not None:
+        created = datetime.strptime(manifest['created_at'], '%Y%m%dT%H%M%S.%fZ').replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+        if age < -1800 or age > max_age_hours * 3600:
+            raise ValueError('Existing snapshot is stale or its clock is ahead')
     if not manifest.get('sources'):
         raise ValueError('Snapshot contains no source stores')
     files = 0
@@ -99,7 +106,10 @@ def collect_host(host, destination, collect_latest, allow_archive_only, log):
         remote = 'python3 "$HOME/Projects/ai-data-extraction/backup_fleet.py" ' + shlex.join(flags)
         command = ['ssh', *SSH_OPTIONS, '--', host, remote]
     completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=log, text=True, timeout=6000, check=True)
-    result = json.loads(completed.stdout)
+    payloads = [line[len(RESULT_PREFIX):] for line in completed.stdout.splitlines() if line.startswith(RESULT_PREFIX)]
+    if len(payloads) != 1:
+        raise ValueError('Worker did not return exactly one result record')
+    result = json.loads(payloads[0])
     run = result['run']
     if not isinstance(run, str) or not run.startswith('/') or any(c in run for c in '\n\r\x00'):
         raise ValueError('Invalid worker output path')
@@ -112,7 +122,7 @@ def collect_host(host, destination, collect_latest, allow_archive_only, log):
             raise ValueError('Remote backup path contains unsupported characters')
         subprocess.run(['scp', '-r', '-B', *SSH_OPTIONS, '--', host + ':' + run, str(destination)],
                        stdout=log, stderr=log, timeout=6000, check=True)
-    return dict(verify_snapshot(destination, allow_archive_only),
+    return dict(verify_snapshot(destination, allow_archive_only, max_age_hours=24 if collect_latest else None),
                 reused_existing_snapshot=result['reused_existing_snapshot'])
 
 
@@ -126,7 +136,7 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     if args.worker:
-        print(json.dumps(worker(args.collect_latest, args.allow_archive_only)))
+        print(RESULT_PREFIX + json.dumps(worker(args.collect_latest, args.allow_archive_only)))
         return 0
     if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', host) or host == 'nexus' for host in args.host):
         parser.error('Use simple SSH aliases distinct from the reserved local label nexus')
@@ -150,7 +160,7 @@ def main():
             try:
                 with (batch / (host + '.log')).open('w') as log:
                     report['hosts'][host] = collect_host(host, batch / host, args.collect_latest, args.allow_archive_only, log)
-            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
                 report['hosts'][host] = {'backup_complete': False, 'error_type': type(error).__name__}
             write_json(batch / 'backup-set.json', report)
             print(host + ': ' + ('verified' if report['hosts'][host]['backup_complete'] else 'needs attention'), flush=True)
