@@ -1,5 +1,6 @@
 import gzip
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -27,9 +28,7 @@ class PortableTests(unittest.TestCase):
 
     def extract(self, name, path, fmt='jsonl'):
         result = extract_source(Source(name, path, fmt), self.output)
-        output = next(self.output.glob(name + '-*.jsonl.gz'))
-        if '.raw.' in output.name:
-            output = next(p for p in self.output.glob(name + '-*.jsonl.gz') if '.raw.' not in p.name)
+        output = next(p for p in self.output.glob(name + '-*.jsonl.gz') if '.raw.' not in p.name)
         with gzip.open(output, 'rt') as handle:
             records = [json.loads(line) for line in handle]
         return result, records
@@ -264,6 +263,104 @@ class PortableTests(unittest.TestCase):
         with patch('extract_portable.jsonl_conversation', side_effect=rewrite):
             result, _ = self.extract('grok', path)
         self.assertEqual(result['status'], 'partial')
+
+    def test_mixed_codex_events_keep_order_and_reasoning(self):
+        path = self.jsonl('mixed.jsonl', [
+            {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'legacy'}},
+            {'type': 'response_item', 'payload': {'type': 'function_call', 'name': 'read'}},
+            {'type': 'event_msg', 'payload': {'type': 'agent_message', 'message': 'old answer'}},
+            {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'modern'}},
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'text': 'modern'}]}},
+            {'type': 'response_item', 'payload': {'type': 'reasoning', 'content': [{'text': 'reason'}]}}])
+        _, records = self.extract('codex', path)
+        messages = records[0]['messages']
+        self.assertEqual(len(messages), 5)
+        self.assertEqual(messages[0]['content'], 'legacy')
+        self.assertEqual(messages[1]['name'], 'read')
+        self.assertEqual(messages[2]['content'], 'old answer')
+        self.assertEqual(messages[-1]['content'], [{'text': 'reason'}])
+
+    def test_failed_database_archives_are_marked_incomplete(self):
+        path, connection = self.database('bad.db', 'CREATE TABLE unknown(x TEXT);')
+        connection.close()
+        with self.assertRaises(ValueError):
+            self.extract('opencode', path, 'sqlite')
+        self.assertEqual(len(list(self.output.glob('*.incomplete'))), 2)
+        self.assertEqual(list(self.output.glob('*.jsonl.gz')), [])
+
+    def test_repeated_cursor_message_reference_preserves_occurrences(self):
+        from extract_cursor_cli import resolve_messages
+        path, connection = self.database('repeat.db', 'CREATE TABLE blobs(id TEXT, data BLOB);')
+        leaf = 'aa' * 32
+        connection.execute('INSERT INTO blobs VALUES (?,?)', (leaf, json.dumps({'role': 'user', 'content': 'repeat'}).encode()))
+        connection.execute('INSERT INTO blobs VALUES (?,?)', ('root', (b'\x0a\x20' + bytes.fromhex(leaf)) * 2))
+        self.assertEqual(len(resolve_messages(connection, 'root')), 2)
+        connection.close()
+
+    @unittest.skipUnless(os.name == 'posix', 'Unix scheduler')
+    def test_monthly_status_flags_empty_discovery_and_binary_archive(self):
+        import monthly_backup
+        for source_status, allow, expected_exit, expected_status in [
+            (None, False, 2, 'needs_attention'),
+            ('archive_only', False, 2, 'needs_attention'),
+            ('archive_only', True, 0, 'completed_with_binary_archive'),
+            ('no_messages', False, 0, 'completed_with_empty_stores')]:
+            with self.subTest(status=source_status, allow=allow):
+                args = ['monthly_backup.py', '--output', str(self.output)]
+                if allow:
+                    args.append('--allow-archive-only')
+                report = {'sources': [] if source_status is None else [{'status': source_status}],
+                          'status': 'partial' if allow else 'verified', 'cleanup_status': 'complete'}
+                with patch('sys.argv', args), patch('monthly_backup.run', return_value=report):
+                    self.assertEqual(monthly_backup.main(), expected_exit)
+                self.assertEqual(json.loads((self.output / 'job-status.json').read_text())['status'], expected_status)
+
+    @unittest.skipUnless(os.name == 'posix', 'Unix locking')
+    def test_monthly_lock_prevents_overlapping_run(self):
+        import fcntl
+        import monthly_backup
+        with (self.output / '.backup.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch('sys.argv', ['monthly_backup.py', '--output', str(self.output)]), patch('monthly_backup.run') as run_backup:
+                self.assertEqual(monthly_backup.main(), 1)
+                run_backup.assert_not_called()
+
+    def test_worktree_failure_does_not_hide_later_worktrees(self):
+        repo = self.home / 'Projects/repo'
+        (repo / '.git').mkdir(parents=True)
+        broken, dirty = self.home / 'broken', self.home / 'dirty'
+        broken.mkdir()
+        dirty.mkdir()
+
+        def inspect(path, *args):
+            if args[:2] == ('worktree', 'list'):
+                return f'worktree {repo}\n\nworktree {broken}\n\nworktree {dirty}\n'
+            if path == broken:
+                raise RuntimeError('unreadable')
+            if args[0] == 'status':
+                return '?? untracked.txt'
+            if args[0] == 'rev-parse':
+                raise RuntimeError('no upstream')
+            if args[0] == 'log':
+                return '1'
+            raise AssertionError(args)
+
+        with patch('monthly_cleanup.git', side_effect=inspect):
+            report = candidate_report({'sources': []}, self.home)
+        self.assertEqual(len(report['worktrees']), 2)
+        self.assertEqual(len(report['errors']), 1)
+        self.assertTrue(report['worktrees'][1]['dirty'])
+
+    @unittest.skipUnless(os.name == 'posix', 'Symlink permission differs on Windows')
+    def test_symlinked_session_directory_is_discovered_without_looping(self):
+        target = self.home / 'session-target'
+        target.mkdir()
+        (target / 'one.jsonl').write_text('')
+        (target / 'loop').symlink_to(target, target_is_directory=True)
+        sessions = self.home / '.pi/agent/sessions'
+        sessions.mkdir(parents=True)
+        (sessions / 'project').symlink_to(target, target_is_directory=True)
+        self.assertEqual(len(discover(self.home, {})), 1)
 
 
 if __name__ == '__main__':

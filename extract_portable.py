@@ -43,12 +43,14 @@ def extract_source(source, output):
     identity = hashlib.sha256(str(source.path).encode()).hexdigest()[:20]
     raw_path = output / (source.harness + '-' + identity + '.raw.jsonl.gz')
     conversation_path = output / (source.harness + '-' + identity + '.jsonl.gz')
+    raw_incomplete = raw_path.with_name(raw_path.name + '.incomplete')
+    conversation_incomplete = conversation_path.with_name(conversation_path.name + '.incomplete')
     before = source.path.stat()
     result = {'harness': source.harness, 'source_path': str(source.path),
               'source_bytes': before.st_size, 'source_mtime': before.st_mtime,
               'conversations': 0, 'messages': 0, 'status': 'ok'}
-    with gzip.open(raw_path, 'wt', encoding='utf-8', compresslevel=6) as raw, \
-            gzip.open(conversation_path, 'wt', encoding='utf-8', compresslevel=6) as normalized:
+    with gzip.open(raw_incomplete, 'wt', encoding='utf-8', compresslevel=6) as raw, \
+            gzip.open(conversation_incomplete, 'wt', encoding='utf-8', compresslevel=6) as normalized:
         def raw_write(record):
             raw.write(json.dumps(record, ensure_ascii=False, default=binary_json) + '\n')
 
@@ -98,7 +100,8 @@ def extract_source(source, output):
         else:
             raw_write({'bytes': base64.b64encode(source.path.read_bytes()).decode('ascii')})
             result['status'] = 'archive_only'
-    result['files'] = {p.name: verify_jsonl(p) for p in [raw_path, conversation_path]}
+    result['files'] = {final.name: verify_jsonl(temporary) for temporary, final in
+                       [(raw_incomplete, raw_path), (conversation_incomplete, conversation_path)]}
     after = source.path.stat()
     result['changed_during_read'] = (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size)
     if source.format == 'jsonl' and result['changed_during_read']:
@@ -119,19 +122,25 @@ def extract_source(source, output):
         result['status'] = 'partial'
     if result['messages'] == 0 and result['status'] == 'ok':
         result['status'] = 'no_messages'
+    raw_incomplete.replace(raw_path)
+    conversation_incomplete.replace(conversation_path)
     return result
 
 
 def run(output_root, home=None, environ=None, only=None, stale_days=90):
     output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output_root, 0o700)
+    previous = {}
+    if (output_root / 'latest.json').exists():
+        previous_run = json.loads((output_root / 'latest.json').read_text())['run']
+        previous = json.loads((Path(previous_run) / 'manifest.json').read_text()).get('coverage', {})
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     output = output_root / stamp
     output.mkdir(mode=0o700)
     sources = [s for s in discover(home, environ) if not only or s.harness in only]
     inventory = installed()
     report = {'version': 1, 'host': socket.gethostname(), 'created_at': stamp,
-              'status': 'running', 'installed': inventory, 'sources': [], 'coverage': {}}
+              'status': 'running', 'home': str(home or Path.home()), 'installed': inventory, 'sources': [], 'coverage': {}}
     write_json(output / 'manifest.json', report)
     for source in sources:
         try:
@@ -139,7 +148,9 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
         except Exception as error:
             # Error text may contain a fragment of private source data; keep logs to type/path.
             result = {'harness': source.harness, 'source_path': str(source.path),
-                      'status': 'error', 'error_type': type(error).__name__}
+                      'status': 'error', 'error_type': type(error).__name__,
+                      'incomplete_files': [p.name for p in output.glob(source.harness + '-' +
+                          hashlib.sha256(str(source.path).encode()).hexdigest()[:20] + '*.incomplete')]}
         report['sources'].append(result)
         if result['status'] in ['error', 'partial']:
             print(source.harness + ': ' + result['status'] + ' (' + str(source.path) + ')', flush=True)
@@ -156,10 +167,21 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
                                     'conversations': sum(r.get('conversations', 0) for r in results),
                                     'messages': sum(r.get('messages', 0) for r in results)}
         print(name + ': ' + json.dumps(report['coverage'][name]), flush=True)
-    report['status'] = 'partial' if any(r['status'] in ['error', 'partial', 'archive_only'] for r in report['sources']) else 'verified'
+    report['missing_history'] = [name for name, coverage in previous.items()
+                                 if name in report['coverage'] and coverage.get('messages', 0) > 0
+                                 and report['coverage'][name]['messages'] == 0]
+    report['status'] = ('no_sources' if not sources else 'partial' if report['missing_history'] or
+                        any(r['status'] in ['error', 'partial', 'archive_only'] for r in report['sources']) else
+                        'verified_with_empty_stores' if any(r['status'] == 'no_messages' for r in report['sources']) else 'verified')
     write_json(output / 'manifest.json', report)
     from monthly_cleanup import candidate_report
-    write_json(output / 'cleanup-candidates.json', candidate_report(report, home, stale_days))
+    try:
+        cleanup = candidate_report(report, home, stale_days)
+    except (OSError, RuntimeError) as error:
+        cleanup = {'mode': 'report_only', 'policy_approved': False, 'error_type': type(error).__name__}
+    write_json(output / 'cleanup-candidates.json', cleanup)
+    report['cleanup_status'] = 'incomplete' if cleanup.get('error_type') or cleanup.get('errors') else 'complete'
+    write_json(output / 'manifest.json', report)
     write_json(output_root / 'latest.json', {'run': str(output), 'status': report['status']})
     print('Manifest: ' + str(output / 'manifest.json'), flush=True)
     return report
@@ -180,7 +202,7 @@ def main():
                                                                for s in discover()]}, indent=2))
         return 0
     report = run(args.output.expanduser().resolve(), only=args.harness, stale_days=args.stale_days)
-    return 0 if report['status'] == 'verified' else 2
+    return 0 if report['status'] in ['verified', 'verified_with_empty_stores'] else 2
 
 
 if __name__ == '__main__':

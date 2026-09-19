@@ -33,11 +33,16 @@ def main():
             if args.allow_archive_only:
                 acceptable.add('archive_only')
             failed = [r for r in report['sources'] if r['status'] not in acceptable]
-            status = 'needs_attention' if failed else 'completed_with_binary_archive' if report['status'] == 'partial' else 'completed'
+            needs_attention = bool(failed or not report['sources'] or report.get('missing_history') or
+                                   report.get('cleanup_status') == 'incomplete')
+            status = ('needs_attention' if needs_attention else
+                      'completed_with_binary_archive' if any(r['status'] == 'archive_only' for r in report['sources']) else
+                      'completed_with_empty_stores' if any(r['status'] == 'no_messages' for r in report['sources']) else 'completed')
             write_json(root / 'job-status.json', {'status': status, 'started_at': started,
                        'finished_at': datetime.now(timezone.utc).isoformat(), 'failed_stores': len(failed),
-                       'cleanup': 'report_only'})
-            return 2 if failed else 0
+                       'cleanup': 'report_only', 'cleanup_status': report.get('cleanup_status'),
+                       'missing_history': report.get('missing_history', [])})
+            return 2 if needs_attention else 0
         except Exception as error:
             write_json(root / 'job-status.json', {'status': 'failed', 'started_at': started,
                                                  'error_type': type(error).__name__})

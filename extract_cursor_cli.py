@@ -26,6 +26,8 @@ def find_chat_roots():
 
 def parse_ref_list(data):
     """Read top-level protobuf references; raw source-code blobs are leaves."""
+    if isinstance(data, str):
+        data = data.encode('utf-8')
     refs = []
     offset = 0
 
@@ -68,13 +70,11 @@ def parse_ref_list(data):
 
 def resolve_messages(conn, root_id):
     messages = []
-    visited = set()
-    pending = [root_id]
+    pending = [(root_id, frozenset())]
     while pending:
-        bid = pending.pop()
-        if bid in visited:
-            continue
-        visited.add(bid)
+        bid, ancestors = pending.pop()
+        if bid in ancestors:
+            raise ValueError('Cycle in Cursor reference tree')
         row = conn.execute('SELECT data FROM blobs WHERE id=?', (bid,)).fetchone()
         if not row:
             raise ValueError('Missing referenced Cursor blob: ' + bid)
@@ -86,7 +86,7 @@ def resolve_messages(conn, root_id):
                 continue
         except (ValueError, UnicodeDecodeError):
             pass
-        pending.extend(reversed(parse_ref_list(data)))
+        pending.extend((ref, ancestors | {bid}) for ref in reversed(parse_ref_list(data)))
     return messages
 
 

@@ -15,7 +15,9 @@ Each run creates a separate UTC timestamp directory under
 For every store it writes compressed raw records and normalized conversations,
 then rereads each archive and records its SHA-256, record count and size in
 `manifest.json`. SQLite reads use a read-only transaction, including committed
-WAL data. Only named conversation tables are exported, never credential tables.
+WAL data. SQLite still needs access to its shared-memory sidecar (or permission
+to create it); a missing inaccessible sidecar fails visibly rather than ignoring
+WAL transactions. Only named conversation tables are exported, never credential tables.
 Conversation content itself can contain secrets; these are private backups, not
 sanitized training datasets. Nothing is uploaded or deleted.
 
@@ -41,7 +43,11 @@ sanitized training datasets. Nothing is uploaded or deleted.
 
 Installed commands and stored history are discovered separately. `no_local_history`
 means there is nothing available to verify on this host, not that an empty
-extraction is proof of compatibility. Unknown database schemas fail. Malformed
+extraction is proof of compatibility. Unknown database schemas fail. Failed output files retain an `.incomplete`
+suffix and are listed in the error record; only verified archives receive their
+final names. Empty discovery and previously present harness history disappearing
+produce an attention status. Metadata-only stores are labeled `no_messages`, not
+verified transcript extraction. Malformed
 JSONL lines are retained as base64 and mark the store partial. JSONL reads are bounded to the initial file size; if the source changes, its
 original prefix is hashed again. Appends are accepted only when that prefix is
 unchanged. Rewrites, truncation and changes to other non-SQLite inputs are partial. Modern Codex's duplicated event messages are
@@ -77,8 +83,9 @@ WantedBy=timers.target
 
 A user timer needs a running user manager; enable user lingering if it should
 run without an interactive login. `Persistent=true` catches up after downtime.
-The scheduler entry point uses an OS file lock to prevent overlapping scheduled
-runs and writes `job-status.json`. Nonzero exit means attention is required.
+The Unix scheduler entry point uses an OS file lock to prevent overlapping scheduled
+runs and writes `job-status.json`. Nonzero exit means attention is required. `completed_with_empty_stores` explicitly
+reports metadata-only stores; this does not verify their transcript format.
 Use `--allow-archive-only` only after explicitly accepting Antigravity's binary
 archive limitation. It does not excuse corrupt data or parsing errors.
 

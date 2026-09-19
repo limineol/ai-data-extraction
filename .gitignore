@@ -33,3 +33,5 @@ backups/
 manifest.json
 cleanup-candidates.json
 job-status.json
+latest.json
+*.incomplete

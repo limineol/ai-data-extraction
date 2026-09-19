@@ -1,5 +1,6 @@
 """Lossless records plus normalized conversation messages for known stores."""
 import base64
+from collections import defaultdict
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -26,6 +27,8 @@ def binary_json(value):
 def normalize_message(message, event=None):
     result = dict(message)
     role = result.get('role', 'assistant')
+    if not isinstance(role, str):
+        raise ValueError('Message role must be a string')
     result['role'] = {'model': 'assistant', 'gemini': 'assistant', 'toolResult': 'tool',
                       'tool_result': 'tool'}.get(role, role.lower())
     if 'content' not in result:
@@ -39,7 +42,7 @@ def normalize_message(message, event=None):
 
 def jsonl_conversation(records, source):
     messages, fallback, metadata = [], [], {}
-    for event in records:
+    for event_index, event in enumerate(records):
         kind = event.get('type')
         if kind in ['session_meta', 'session', 'session_start']:
             metadata.update(event.get('payload', event))
@@ -47,14 +50,14 @@ def jsonl_conversation(records, source):
             payload = event.get('payload', {})
             if kind == 'response_item':
                 if payload.get('type') == 'message':
-                    messages.append(normalize_message(payload, event))
+                    messages.append((event_index, normalize_message(payload, event)))
                 elif payload.get('type') in ['function_call', 'custom_tool_call', 'function_call_output',
                                               'custom_tool_call_output', 'reasoning', 'web_search_call']:
-                    messages.append(dict(payload, role='tool' if payload['type'].endswith('_output') else 'assistant',
-                                         content=payload.get('output', ''), timestamp=event.get('timestamp')))
+                    messages.append((event_index, dict(payload, role='tool' if payload['type'].endswith('_output') else 'assistant',
+                                         content=payload.get('content', payload.get('output', '')), timestamp=event.get('timestamp'))))
             elif kind == 'event_msg' and payload.get('type') in ['user_message', 'agent_message']:
-                fallback.append({'role': 'user' if payload['type'] == 'user_message' else 'assistant',
-                                 'content': payload.get('message', ''), 'timestamp': event.get('timestamp')})
+                fallback.append((event_index, {'role': 'user' if payload['type'] == 'user_message' else 'assistant',
+                                 'content': payload.get('message', ''), 'timestamp': event.get('timestamp')}))
         elif isinstance(event.get('message'), dict) and 'role' in event['message']:
             messages.append(normalize_message(event['message'], event))
         elif source.harness == 'grok' and kind in ['system', 'user', 'assistant', 'tool_result', 'reasoning']:
@@ -62,10 +65,26 @@ def jsonl_conversation(records, source):
         elif source.harness == 'copilot' and kind in ['user.message', 'assistant.message', 'tool.execution_complete']:
             payload = event.get('data', {})
             messages.append(normalize_message(dict(payload, role=kind.split('.')[0]), event))
-    # Modern Codex emits response_item and event_msg copies of the same turn.
-    # Prefer the model transcript, retaining every event in the raw archive.
-    if source.harness == 'codex' and not any(m['role'] in ['user', 'assistant'] and m.get('type') == 'message' for m in messages):
-        messages = fallback + messages
+    if source.harness == 'codex':
+        # Match only actual duplicate text events. Keep unmatched legacy turns
+        # in place when a rollout spans a storage-format transition.
+        candidates = defaultdict(list)
+        for index, message in fallback:
+            candidates[(message['role'], message['content'])].append(index)
+        matched = set()
+        for index, message in messages:
+            if message.get('type') != 'message':
+                continue
+            content = message.get('content', '')
+            text = content if isinstance(content, str) else ''.join(
+                part.get('text', '') for part in content if isinstance(part, dict))
+            matches = candidates[(message['role'], text)]
+            if matches:
+                duplicate = min(matches, key=lambda position: abs(position - index))
+                matches.remove(duplicate)
+                matched.add(duplicate)
+        messages.extend((index, message) for index, message in fallback if index not in matched)
+        messages = [message for _, message in sorted(messages, key=lambda pair: pair[0])]
     return {'source': source.harness, 'session_id': metadata.get('id', source.path.stem),
             'metadata': metadata, 'messages': messages}
 
@@ -116,6 +135,9 @@ def database_conversations(connection, source, raw_write):
         message_table = 'messages' if name == 'hermes' else 'message_nodes'
         for session in rows(connection, 'sessions'):
             raw_write({'table': 'sessions', 'row': session})
+            if name == 'hermes' and 'system_prompts' in tables and session.get('system_prompt_hash'):
+                for prompt in rows(connection, 'system_prompts', 'WHERE hash=?', (session['system_prompt_hash'],)):
+                    raw_write({'table': 'system_prompts', 'row': prompt})
             messages = []
             order = 'timestamp, id' if name == 'hermes' else 'node_id'
             for row in rows(connection, message_table, 'WHERE session_id=? ORDER BY ' + order, (session['id'],)):
