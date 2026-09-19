@@ -129,7 +129,7 @@ def extract_source(source, output):
     return result
 
 
-def run(output_root, home=None, environ=None, only=None, stale_days=90):
+def run(output_root, home=None, environ=None, only=None, stale_days=60):
     output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output_root, 0o700)
     previous = {}
@@ -203,7 +203,7 @@ def main():
     parser.add_argument('--output', type=Path, default=Path.home() / '.local/share/ai-data-extraction/backups')
     parser.add_argument('--inventory', action='store_true')
     parser.add_argument('--harness', action='append', choices=COMMANDS)
-    parser.add_argument('--stale-days', type=int, default=90)
+    parser.add_argument('--stale-days', type=int, default=60)
     args = parser.parse_args()
     if args.stale_days < 1:
         parser.error('--stale-days must be positive')

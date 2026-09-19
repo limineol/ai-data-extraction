@@ -11,7 +11,7 @@ def git(path, *args):
     return result.stdout
 
 
-def candidate_report(manifest, home=None, stale_days=90):
+def candidate_report(manifest, home=None, stale_days=60):
     home = Path(home or Path.home())
     cutoff = time.time() - stale_days * 86400
     sessions = []
