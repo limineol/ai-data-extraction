@@ -12,6 +12,7 @@ content-addressed blob store:
 Walking refs from latestRootBlobId reconstructs messages in order.
 """
 import json
+import os
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
@@ -49,7 +50,7 @@ def parse_ref_list(data):
             tag = varint()
             field, wire = tag >> 3, tag & 7
             if field == 0:
-                return []
+                raise ValueError('Invalid protobuf frame')
             if wire == 0:
                 varint()
             elif wire in (1, 5):
@@ -60,11 +61,11 @@ def parse_ref_list(data):
                     refs.append(data[offset:offset + size].hex())
                 offset += size
             else:
-                return []
+                raise ValueError('Invalid protobuf frame')
             if offset > len(data):
-                return []
+                raise ValueError('Invalid protobuf frame')
     except ValueError:
-        return []
+        raise
     return refs
 
 
@@ -86,11 +87,24 @@ def resolve_messages(conn, root_id):
                 continue
         except (ValueError, UnicodeDecodeError):
             pass
-        pending.extend((ref, ancestors | {bid}) for ref in reversed(parse_ref_list(data)))
+        try:
+            refs = parse_ref_list(data)
+        except ValueError:
+            try:
+                text = data if isinstance(data, str) else data.decode('utf-8')
+                is_text = all(character.isprintable() or character in '\n\r\t' for character in text)
+            except UnicodeDecodeError:
+                is_text = False
+            if bid == root_id or not is_text:
+                raise
+            refs = []
+        pending.extend((ref, ancestors | {bid}) for ref in reversed(refs))
     return messages
 
 
 def load_meta(conn):
+    if conn.execute('SELECT COUNT(*) FROM meta').fetchone()[0] > 1:
+        raise ValueError('Ambiguous Cursor metadata rows')
     row = conn.execute('SELECT value FROM meta LIMIT 1').fetchone()
     if not row:
         return {}
@@ -139,6 +153,7 @@ def extract_store(db_path, chat_id):
 
 
 def main():
+    os.umask(0o077)
     print('=' * 80)
     print('CURSOR-AGENT CLI EXTRACTION (~/.cursor/chats)')
     print('=' * 80)

@@ -59,40 +59,64 @@ that every branch is one linear conversation.
 home overrides supported by discovery: `GROK_HOME`, `PI_CODING_AGENT_DIR`,
 `OMP_CODING_AGENT_DIR`, `XDG_DATA_HOME`, and `APPDATA`.
 
-## Monthly scheduling (macOS / Linux)
+## Centralized monthly scheduling from Nexus
 
-Run and inspect an initial backup before installing a schedule. Use the actual
-absolute Python and checkout paths; cron does not load your interactive shell.
-For example, add this to `crontab -e`, preserving all existing jobs:
+Nexus is the local coordinator. Vector and Forge need SSH access, Python 3.9+,
+and this checkout at `~/Projects/ai-data-extraction`. OpenSSH scp transfers the
+completed snapshots; it never copies live SQLite databases. No remote schedules
+are needed, and no files are uploaded to cloud storage.
+
+```sh
+python3 backup_fleet.py --host vector --host forge --allow-archive-only
+```
+
+Each host runs its local extractor, then Nexus collects the results under
+`~/.local/share/ai-data-extraction/monthly/<UTC timestamp>/{nexus,vector,forge}/`.
+Nexus hard-links its own immutable archives where possible to avoid duplicate
+storage, and copies them if hard links are unavailable. Remote archives are
+copied with SCP. Every collected archive is checked against its manifest's
+SHA-256 and byte count. The aggregate `backup-set.json` records per-host coverage
+and verification. A failed host does not prevent collecting the other hosts.
+A set with failed extraction or transfer is never marked complete.
+
+The `nexus` label denotes the local machine. Remote names must be simple SSH
+aliases (letters, numbers, dots, underscores or hyphens), and remote backup paths
+must contain only letters, numbers, underscores, dots, slashes or hyphens.
+Interactive authentication is disabled; existing SSH configuration and known
+host verification apply. No host-key bypass or credentials are stored.
+
+To collect already completed initial snapshots without extracting again:
+
+```sh
+python3 backup_fleet.py --host vector --host forge --allow-archive-only --collect-latest
+```
+
+The report explicitly records that snapshots were reused and their original
+timestamps. Do not put `--collect-latest` in the monthly schedule.
+
+Install **one** cron entry on Nexus, with absolute paths to Python and the checkout:
 
 ```cron
-15 9 1 * * /absolute/python3 /absolute/ai-data-extraction/monthly_backup.py >> /absolute/private/backup.log 2>&1
+15 9 1 * * /absolute/python3 /absolute/ai-data-extraction/backup_fleet.py --host vector --host forge --allow-archive-only >> /absolute/private/backup.log 2>&1
 ```
 
-This runs at 09:15 on the first day of each month in the host's local timezone.
-Cron skips runs while the machine is off/asleep. For Linux without cron, use a
-user systemd service with the same `ExecStart` and a timer:
+This runs at 09:15 on the first of each month in Nexus's local timezone. Nexus
+must be awake at that time; cron does not catch up after downtime. Vector and
+Forge must be reachable over SSH. OS file locks prevent overlapping fleet jobs
+and overlapping per-host extraction. No auto-update or remote code deployment
+occurs in the scheduled job. Deploy code updates deliberately to all hosts.
 
-```ini
-[Timer]
-OnCalendar=*-*-01 09:15:00
-Persistent=true
-[Install]
-WantedBy=timers.target
-```
+`--allow-archive-only` accepts the explicit Antigravity protobuf limitation;
+it does not excuse malformed records or failed transfers. Empty history is not
+live compatibility verification. Metadata-only stores are labeled `no_messages`.
+The set can be `completed_with_cleanup_warnings` when archives verify but Git
+metadata inspection needs attention. These warnings never enable deletion.
 
-A user timer needs a running user manager; enable user lingering if it should
-run without an interactive login. `Persistent=true` catches up after downtime.
-The Unix scheduler entry point uses an OS file lock to prevent overlapping scheduled
-runs and writes `job-status.json`. Nonzero exit means attention is required. `completed_with_empty_stores` explicitly
-reports metadata-only stores; this does not verify their transcript format.
-Use `--allow-archive-only` only after explicitly accepting Antigravity's binary
-archive limitation. It does not excuse corrupt data or parsing errors.
-
-Backups are full snapshots. Old backups and failed runs remain available until
-a separate retention policy is approved. Keep backups on a durable private
-volume; a same-disk archive does not protect against disk loss. No auto-update
-or remote code execution occurs in the monthly job.
+Each host retains its extraction snapshot. The central set is a private folder
+ready for a later Proton Drive upload step. Upload is not implemented in this
+version. Future upload must check `backup-set.json` and refuse incomplete sets.
+Full snapshots and intermediate failed runs have no automatic retention policy.
+Same-disk local archives do not protect against disk loss.
 
 ## Cleanup proposal — approval required
 

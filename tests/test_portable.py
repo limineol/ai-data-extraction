@@ -234,7 +234,8 @@ class PortableTests(unittest.TestCase):
 
     def test_cursor_source_code_is_not_a_reference_tree(self):
         from extract_cursor_cli import parse_ref_list
-        self.assertEqual(parse_ref_list(b'import something\n ' + b'a' * 32 + b';\n'), [])
+        with self.assertRaises(ValueError):
+            parse_ref_list(b'import something\n ' + b'a' * 32 + b';\n')
         self.assertEqual(parse_ref_list(b'\x0a\x20' + b'a' * 32), [(b'a' * 32).hex()])
 
     def test_append_during_extraction_keeps_verified_initial_prefix(self):
@@ -375,6 +376,30 @@ class PortableTests(unittest.TestCase):
         self.assertEqual(second['missing_history'], ['grok'])
         self.assertEqual(third['missing_history'], ['grok'])
         self.assertEqual(third['status'], 'partial')
+
+    def test_orphaned_database_rows_survive_in_raw_archive(self):
+        path, connection = self.database('orphan.db', '''
+            CREATE TABLE session_v2(id TEXT);
+            CREATE TABLE session_message(id TEXT, session_id TEXT, type TEXT, seq INT, data TEXT);
+        ''')
+        connection.execute('INSERT INTO session_message VALUES (?,?,?,?,?)', ('orphan', 'missing', 'user', 1, json.dumps({'text': 'preserve'})))
+        connection.commit()
+        connection.close()
+        result, records = self.extract('opencode', path, 'sqlite')
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(records[0]['orphan_counts'], {'session_message': 1})
+        with gzip.open(next(self.output.glob('*.raw.jsonl.gz')), 'rt') as handle:
+            self.assertEqual(json.loads(handle.readline())['row']['id'], 'orphan')
+
+    def test_removed_previous_snapshot_does_not_stop_new_backup(self):
+        from harness_sources import COMMANDS
+        (self.output / 'latest.json').write_text(json.dumps({'run': str(self.home / 'removed')}))
+        self.jsonl('.pi/agent/sessions/one.jsonl', [{'type': 'message', 'message': {'role': 'user', 'content': 'pi'}}])
+        with patch('extract_portable.installed', return_value={name: [] for name in COMMANDS}), patch('builtins.print'):
+            report = run(self.output, self.home, {})
+        self.assertEqual(report['baseline_warning'], 'FileNotFoundError')
+        self.assertEqual(report['coverage']['pi']['messages'], 1)
+        self.assertEqual(report['status'], 'partial')
 
 
 if __name__ == '__main__':

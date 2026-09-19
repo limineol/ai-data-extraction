@@ -33,7 +33,7 @@ def main():
             if args.allow_archive_only:
                 acceptable.add('archive_only')
             failed = [r for r in report['sources'] if r['status'] not in acceptable]
-            needs_attention = bool(failed or not report['sources'] or report.get('missing_history') or
+            needs_attention = bool(failed or not report['sources'] or report.get('missing_history') or report.get('baseline_warning') or
                                    report.get('cleanup_status') == 'incomplete')
             status = ('needs_attention' if needs_attention else
                       'completed_with_binary_archive' if any(r['status'] == 'archive_only' for r in report['sources']) else

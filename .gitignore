@@ -35,3 +35,5 @@ cleanup-candidates.json
 job-status.json
 latest.json
 *.incomplete
+monthly/
+backup-set.json

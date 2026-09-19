@@ -96,6 +96,31 @@ def rows(connection, table, where='', parameters=()):
 def database_conversations(connection, source, raw_write):
     tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     name = source.harness
+    raw_tables = {
+        'opencode': ['session', 'message', 'part', 'session_v2', 'session_message'],
+        'hermes': ['sessions', 'messages', 'system_prompts'],
+        'devin': ['sessions', 'message_nodes', 'tool_call_state'],
+    }
+    for table in raw_tables.get(name, []):
+        if table in tables:
+            for row in connection.execute('SELECT * FROM "' + table + '"'):
+                raw_write({'table': table, 'row': dict(row)})
+    orphan_counts = {}
+    relationships = {
+        'opencode': [('message', 'session_id', 'session'), ('part', 'message_id', 'message'),
+                     ('session_message', 'session_id', 'session_v2')],
+        'hermes': [('messages', 'session_id', 'sessions')],
+        'devin': [('message_nodes', 'session_id', 'sessions'), ('tool_call_state', 'session_id', 'sessions')],
+    }
+    for child, foreign_key, parent in relationships.get(name, []):
+        if child in tables and parent in tables:
+            count = connection.execute('SELECT COUNT(*) FROM "' + child + '" AS child WHERE NOT EXISTS '
+                                       '(SELECT 1 FROM "' + parent + '" AS parent WHERE parent.id=child."' + foreign_key + '")').fetchone()[0]
+            if count:
+                orphan_counts[child] = count
+    if orphan_counts:
+        yield {'source': name, 'session_id': None, 'messages': [], 'incomplete': True,
+               'orphan_counts': orphan_counts}
     if name == 'cursor-cli':
         from extract_cursor_cli import load_meta, resolve_messages
         for table in ['meta', 'blobs']:
@@ -105,7 +130,7 @@ def database_conversations(connection, source, raw_write):
         if not meta.get('latestRootBlobId'):
             raise ValueError('Cursor store has no transcript root')
         yield {'source': name, 'session_id': source.path.parent.name, 'metadata': meta,
-               'messages': resolve_messages(connection, meta['latestRootBlobId'])}
+               'messages': [normalize_message(m) for m in resolve_messages(connection, meta['latestRootBlobId'])]}
     elif name == 'opencode':
         supported = False
         for session_table, message_table in [('session', 'message'), ('session_v2', 'session_message')]:
@@ -113,16 +138,12 @@ def database_conversations(connection, source, raw_write):
                 continue
             supported = True
             for session in rows(connection, session_table):
-                raw_write({'table': session_table, 'row': session})
                 messages = []
                 order = 'seq' if message_table == 'session_message' else 'time_created, id'
                 for row in rows(connection, message_table, 'WHERE session_id=? ORDER BY ' + order, (session['id'],)):
-                    raw_write({'table': message_table, 'row': row})
                     data = json.loads(row['data'])
                     if message_table == 'message':
                         parts = rows(connection, 'part', 'WHERE message_id=? ORDER BY time_created, id', (row['id'],))
-                        for part in parts:
-                            raw_write({'table': 'part', 'row': part})
                         data['content'] = [json.loads(part['data']) for part in parts]
                     else:
                         data['role'] = row['type']
@@ -134,20 +155,12 @@ def database_conversations(connection, source, raw_write):
     elif name in ['hermes', 'devin']:
         message_table = 'messages' if name == 'hermes' else 'message_nodes'
         for session in rows(connection, 'sessions'):
-            raw_write({'table': 'sessions', 'row': session})
-            if name == 'hermes' and 'system_prompts' in tables and session.get('system_prompt_hash'):
-                for prompt in rows(connection, 'system_prompts', 'WHERE hash=?', (session['system_prompt_hash'],)):
-                    raw_write({'table': 'system_prompts', 'row': prompt})
             messages = []
             order = 'timestamp, id' if name == 'hermes' else 'node_id'
             for row in rows(connection, message_table, 'WHERE session_id=? ORDER BY ' + order, (session['id'],)):
-                raw_write({'table': message_table, 'row': row})
                 message = row if name == 'hermes' else dict(json.loads(row['chat_message']),
                                                           node_id=row['node_id'], parent_node_id=row['parent_node_id'])
                 messages.append(normalize_message(message))
-            if name == 'devin' and 'tool_call_state' in tables:
-                for row in rows(connection, 'tool_call_state', 'WHERE session_id=?', (session['id'],)):
-                    raw_write({'table': 'tool_call_state', 'row': row})
             yield {'source': name, 'session_id': session['id'], 'metadata': session, 'messages': messages}
     elif name == 'forgecode':
         for row in rows(connection, 'conversations'):

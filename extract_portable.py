@@ -61,6 +61,8 @@ def extract_source(source, output):
             result['messages'] += len(conversation['messages'])
             if conversation.get('archive_only'):
                 result['status'] = 'archive_only'
+            if conversation.get('incomplete'):
+                result['status'] = 'partial'
 
         if source.format == 'jsonl':
             records = []
@@ -132,19 +134,23 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
     os.chmod(output_root, 0o700)
     previous = {}
     expected_harnesses = set()
+    baseline_warning = None
     if (output_root / 'latest.json').exists():
-        previous_run = json.loads((output_root / 'latest.json').read_text())['run']
-        previous_manifest = json.loads((Path(previous_run) / 'manifest.json').read_text())
-        previous = previous_manifest.get('coverage', {})
-        expected_harnesses.update(previous_manifest.get('expected_harnesses', []))
-        expected_harnesses.update(name for name, coverage in previous.items() if coverage.get('messages', 0) > 0)
+        try:
+            previous_run = json.loads((output_root / 'latest.json').read_text())['run']
+            previous_manifest = json.loads((Path(previous_run) / 'manifest.json').read_text())
+            previous = previous_manifest.get('coverage', {})
+            expected_harnesses.update(previous_manifest.get('expected_harnesses', []))
+            expected_harnesses.update(name for name, coverage in previous.items() if coverage.get('messages', 0) > 0)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            baseline_warning = type(error).__name__
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
     output = output_root / stamp
     output.mkdir(mode=0o700)
     sources = [s for s in discover(home, environ) if not only or s.harness in only]
     inventory = installed()
     report = {'version': 1, 'host': socket.gethostname(), 'created_at': stamp,
-              'status': 'running', 'home': str(home or Path.home()), 'installed': inventory, 'sources': [], 'coverage': {}}
+              'status': 'running', 'baseline_warning': baseline_warning, 'home': str(home or Path.home()), 'installed': inventory, 'sources': [], 'coverage': {}}
     write_json(output / 'manifest.json', report)
     for source in sources:
         try:
@@ -175,7 +181,7 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
     report['expected_harnesses'] = sorted(expected_harnesses)
     report['missing_history'] = sorted(name for name in expected_harnesses
                                        if name in report['coverage'] and report['coverage'][name]['messages'] == 0)
-    report['status'] = ('no_sources' if not sources else 'partial' if report['missing_history'] or
+    report['status'] = ('no_sources' if not sources else 'partial' if report['missing_history'] or baseline_warning or
                         any(r['status'] in ['error', 'partial', 'archive_only'] for r in report['sources']) else
                         'verified_with_empty_stores' if any(r['status'] == 'no_messages' for r in report['sources']) else 'verified')
     write_json(output / 'manifest.json', report)
