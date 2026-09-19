@@ -1,3 +1,5 @@
+> **This fork:** For current harness formats, private verified archives and monthly scheduling, see [Portable monthly backups](PORTABLE_BACKUPS.md). Run `python3 extract_portable.py --inventory` to inspect coverage. Cleanup is report-only pending policy approval.
+
 # AI Coding Assistant Training Data Extraction Toolkit
 
 Complete toolkit to extract ALL chat, agent, and code context data from AI coding assistants for machine learning training.
