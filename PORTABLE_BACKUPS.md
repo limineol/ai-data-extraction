@@ -121,7 +121,7 @@ Same-disk local archives do not protect against disk loss.
 
 ## Cleanup proposal — approval required
 
-Every run writes `cleanup-candidates.json`. The starting proposal is 90 days of
+Every run writes `cleanup-candidates.json`. The default report threshold is 60 days of
 inactivity followed by 30 days of quarantine. This is a proposal, not an enabled
 deletion policy. The report lists old session-store files and registered
 worktrees found through direct repositories in `~/Projects`.
