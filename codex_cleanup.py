@@ -151,7 +151,7 @@ def plan(home, proofs, stale_days=60, protected_ids=(), now=None):
             state['reasons'].append('unknown_descendant_graph')
             continue
         affected = {member for member in family if states[member]['archived'] != 1}
-        if any(states[member]['reasons'] for member in affected):
+        if any(states[member]['reasons'] for member in family):
             state['reasons'].append('protected_descendant')
         else:
             eligible[thread_id] = affected
@@ -162,11 +162,14 @@ def plan(home, proofs, stale_days=60, protected_ids=(), now=None):
         if affected & covered:
             states[root]['reasons'].append('overlapping_archive_group')
             continue
-        groups.append({'root': root, 'affected': sorted(affected)})
+        groups.append({'root': root, 'affected': sorted(affected), 'runtime_check': sorted(descendants(root))})
         covered.update(affected)
     return {'mode': 'native_archive_plan', 'inactive_days': stale_days, 'quarantine_days': 30,
             'evaluated_at_epoch': time.time() if now is None else now, 'cutoff_epoch': cutoff, 'groups': groups, 'affected_count': len(covered), 'threads': states,
-            'requires': ['Confirmed off-device backup', 'Fresh runtime idle/pin check for every affected chat',
+            'unmatched_protected_ids': sorted(protected_ids - set(states)),
+            'requires': ['Confirmed off-device backup', 'Fresh runtime idle/pin check for every runtime_check ID, including archived descendants',
+                         'Check each root live runtime subtree; abort on IDs outside runtime_check',
+                         'Resolve unmatched protected IDs before acting; they may belong to another host',
                          'Recompute this plan immediately before native archive', 'Verify history and archive state afterward'],
             'permanent_deletion_enabled': False}
 

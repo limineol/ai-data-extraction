@@ -156,13 +156,15 @@ python3 codex_cleanup.py --backup /private/backups/RUN --output /private/plan.js
 The planner verifies both archive files and compares current per-thread history
 against the backed-up digests. It requires at least 60 days of inactivity, known
 pin/archive flags, completed turns, and backed-up history for every affected
-unarchived descendant. Unknown state, missing graph members, cycles, and protected
+descendant, including archived descendants that native archive may stop. Unknown state, missing graph members, cycles, and protected
 children prevent a parent from being selected. `--protected-ids` accepts a JSON
 list of additional pinned or active IDs from the app.
 
 A plan is not an archive command or an authorization token. Before acting, confirm
-the off-device copy, check every affected chat's current runtime and pin state,
-and recompute the plan. Codex's native archive operation also archives descendants.
+the off-device copy, check every `runtime_check` chat's current runtime and pin state (including archived
+descendants), and recompute the plan. Check each root's live runtime subtree and
+abort if it contains IDs outside `runtime_check`. Resolve `unmatched_protected_ids`
+before acting; do not assume an unknown protected ID belongs to another host. Codex's native archive operation also archives descendants.
 Afterward, verify history digests and archive flags and record a recovery ledger
 with a minimum 30-day quarantine. Separate metadata and history WAL transactions
 are not an atomic cross-database snapshot; fresh checks are required. This runner

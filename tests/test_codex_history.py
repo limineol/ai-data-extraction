@@ -78,7 +78,7 @@ class CodexHistoryTests(unittest.TestCase):
     def test_changed_history_is_protected_but_unrelated_append_is_not(self):
         proofs = self.backup()
         self.add_thread('other')
-        self.assertEqual(self.get_plan(proofs)['groups'], [{'root': 'parent', 'affected': ['parent']}])
+        self.assertEqual(self.get_plan(proofs)['groups'], [{'root': 'parent', 'affected': ['parent'], 'runtime_check': ['parent']}])
         self.history.execute("UPDATE thread_items SET item_json=? WHERE thread_id='parent'",
                              (json.dumps({'id': 'user', 'type': 'userMessage', 'content': ['changed']}),))
         self.history.commit()
@@ -96,7 +96,7 @@ class CodexHistoryTests(unittest.TestCase):
         self.add_thread('child')
         self.state.execute("INSERT INTO thread_spawn_edges VALUES('parent','child')")
         self.state.commit()
-        self.assertEqual(self.get_plan()['groups'], [{'root': 'parent', 'affected': ['child', 'parent']}])
+        self.assertEqual(self.get_plan()['groups'], [{'root': 'parent', 'affected': ['child', 'parent'], 'runtime_check': ['child', 'parent']}])
         for column, value in [('is_pinned', 1), ('recency_at', 99 * 86400), ('archived', None)]:
             with self.subTest(column=column):
                 self.state.execute(f'UPDATE threads SET {column}=? WHERE id=?', (value, 'child'))
@@ -107,6 +107,25 @@ class CodexHistoryTests(unittest.TestCase):
         self.history.execute("UPDATE thread_turns SET status='inProgress' WHERE thread_id='child'")
         self.history.commit()
         self.assertEqual(self.get_plan()['affected_count'], 0)
+
+    def test_archived_active_descendant_blocks_parent_archive(self):
+        self.add_thread('child', status='inProgress')
+        self.state.execute("UPDATE threads SET archived=1 WHERE id='child'")
+        self.state.execute("INSERT INTO thread_spawn_edges VALUES('parent','child')")
+        self.state.commit()
+        result = self.get_plan()
+        self.assertEqual(result['affected_count'], 0)
+        self.assertIn('protected_descendant', result['threads']['parent']['reasons'])
+
+    def test_archived_descendants_still_require_runtime_checks(self):
+        self.add_thread('child')
+        self.state.execute("UPDATE threads SET archived=1 WHERE id='child'")
+        self.state.execute("INSERT INTO thread_spawn_edges VALUES('parent','child')")
+        self.state.commit()
+        self.assertEqual(self.get_plan()['groups'], [{'root': 'parent', 'affected': ['parent'],
+                                                     'runtime_check': ['child', 'parent']}])
+        self.assertEqual(self.get_plan(protected_ids=['child'])['affected_count'], 0)
+        self.assertEqual(self.get_plan(protected_ids=['unknown'])['unmatched_protected_ids'], ['unknown'])
 
     def test_unknown_descendants_and_cycles_protected(self):
         self.state.execute("INSERT INTO thread_spawn_edges VALUES('parent','missing')")
