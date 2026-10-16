@@ -18,7 +18,7 @@ class FleetTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         content = gzip.compress(b'{"role":"user","content":"hello"}\n')
         (self.root / 'records.jsonl.gz').write_bytes(content)
-        self.manifest = {'created_at': '20260919T000000.000000Z', 'cleanup_status': 'complete',
+        self.manifest = {'version': 2, 'created_at': '20260919T000000.000000Z', 'cleanup_status': 'complete',
                          'sources': [{'harness': 'pi', 'status': 'ok', 'files': {
                              'records.jsonl.gz': {'sha256': hashlib.sha256(content).hexdigest(), 'bytes': len(content)}}}],
                          'coverage': {'pi': {'messages': 1}}}
@@ -31,6 +31,12 @@ class FleetTests(unittest.TestCase):
         result = self.fleet.verify_snapshot(self.root)
         self.assertTrue(result['backup_complete'])
         self.assertEqual(result['verified_files'], 1)
+
+    def test_old_extractor_cannot_certify_paginated_coverage(self):
+        self.manifest['version'] = 1
+        self.write_manifest()
+        with self.assertRaises(ValueError):
+            self.fleet.verify_snapshot(self.root)
 
     def test_transfer_corruption_fails(self):
         (self.root / 'records.jsonl.gz').write_bytes(b'corrupted')

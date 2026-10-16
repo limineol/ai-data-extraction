@@ -11,6 +11,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from codex_history import export_history
 from harness_sources import COMMANDS, discover, installed
 from harness_records import (binary_json, database_conversations, jsonl_conversation,
                              legacy_json_conversation, read_database)
@@ -46,7 +47,7 @@ def extract_source(source, output):
     raw_incomplete = raw_path.with_name(raw_path.name + '.incomplete')
     conversation_incomplete = conversation_path.with_name(conversation_path.name + '.incomplete')
     before = source.path.stat()
-    result = {'harness': source.harness, 'source_path': str(source.path),
+    result = {'harness': source.harness, 'format': source.format, 'source_path': str(source.path),
               'source_bytes': before.st_size, 'source_mtime': before.st_mtime,
               'conversations': 0, 'messages': 0, 'status': 'ok'}
     with gzip.open(raw_incomplete, 'wt', encoding='utf-8', compresslevel=6) as raw, \
@@ -64,7 +65,7 @@ def extract_source(source, output):
             if conversation.get('incomplete'):
                 result['status'] = 'partial'
 
-        if source.format == 'jsonl':
+        if source.format in ['jsonl', 'codex-jsonl-raw']:
             records = []
             source_hash = hashlib.sha256()
             remaining = before.st_size
@@ -78,6 +79,9 @@ def extract_source(source, output):
                     remaining -= len(line)
                     source_hash.update(line)
                     index += 1
+                    if source.format == 'codex-jsonl-raw':
+                        raw_write({'bytes': base64.b64encode(line).decode('ascii')})
+                        continue
                     if not line.strip():
                         continue
                     try:
@@ -92,7 +96,11 @@ def extract_source(source, output):
                     raw_write(event)
                     records.append(event)
             result['source_sha256'] = source_hash.hexdigest()
-            emit(jsonl_conversation(records, source))
+            if source.format == 'jsonl':
+                emit(jsonl_conversation(records, source))
+        elif source.format == 'codex-sqlite':
+            for conversation in export_history(source.path.parent, raw_write):
+                emit(conversation)
         elif source.format == 'sqlite':
             with read_database(source.path) as connection:
                 for conversation in database_conversations(connection, source, raw_write):
@@ -106,7 +114,7 @@ def extract_source(source, output):
                        [(raw_incomplete, raw_path), (conversation_incomplete, conversation_path)]}
     after = source.path.stat()
     result['changed_during_read'] = (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size)
-    if source.format == 'jsonl' and result['changed_during_read']:
+    if source.format in ['jsonl', 'codex-jsonl-raw'] and result['changed_during_read']:
         # Appending to an active session is normal. Verify the exact prefix read
         # before accepting that prefix as a coherent snapshot.
         prefix_hash = hashlib.sha256()
@@ -120,7 +128,7 @@ def extract_source(source, output):
                 remaining -= len(chunk)
         if remaining or prefix_hash.hexdigest() != result['source_sha256']:
             result['status'] = 'partial'
-    elif source.format != 'sqlite' and result['changed_during_read']:
+    elif source.format not in ['sqlite', 'codex-sqlite'] and result['changed_during_read']:
         result['status'] = 'partial'
     if result['messages'] == 0 and result['status'] == 'ok':
         result['status'] = 'no_messages'
@@ -129,7 +137,7 @@ def extract_source(source, output):
     return result
 
 
-def run(output_root, home=None, environ=None, only=None, stale_days=90):
+def run(output_root, home=None, environ=None, only=None, stale_days=60):
     output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output_root, 0o700)
     previous = {}
@@ -149,7 +157,7 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
     output.mkdir(mode=0o700)
     sources = [s for s in discover(home, environ) if not only or s.harness in only]
     inventory = installed()
-    report = {'version': 1, 'host': socket.gethostname(), 'created_at': stamp,
+    report = {'version': 2, 'host': socket.gethostname(), 'created_at': stamp,
               'status': 'running', 'baseline_warning': baseline_warning, 'home': str(home or Path.home()), 'installed': inventory, 'sources': [], 'coverage': {}}
     write_json(output / 'manifest.json', report)
     for source in sources:
@@ -157,7 +165,7 @@ def run(output_root, home=None, environ=None, only=None, stale_days=90):
             result = extract_source(source, output)
         except Exception as error:
             # Error text may contain a fragment of private source data; keep logs to type/path.
-            result = {'harness': source.harness, 'source_path': str(source.path),
+            result = {'harness': source.harness, 'format': source.format, 'source_path': str(source.path),
                       'status': 'error', 'error_type': type(error).__name__,
                       'incomplete_files': [p.name for p in output.glob(source.harness + '-' +
                           hashlib.sha256(str(source.path).encode()).hexdigest()[:20] + '*.incomplete')]}
@@ -203,7 +211,7 @@ def main():
     parser.add_argument('--output', type=Path, default=Path.home() / '.local/share/ai-data-extraction/backups')
     parser.add_argument('--inventory', action='store_true')
     parser.add_argument('--harness', action='append', choices=COMMANDS)
-    parser.add_argument('--stale-days', type=int, default=90)
+    parser.add_argument('--stale-days', type=int, default=60)
     args = parser.parse_args()
     if args.stale_days < 1:
         parser.error('--stale-days must be positive')

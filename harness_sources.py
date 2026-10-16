@@ -2,8 +2,12 @@
 import os
 import fnmatch
 import shutil
+import sqlite3
+
 from dataclasses import dataclass
 from pathlib import Path
+
+from codex_history import paginated_rollout_paths
 
 
 COMMANDS = {
@@ -49,6 +53,7 @@ def discover(home=None, environ=None):
                     key = str(path.resolve())
                     found.setdefault(key, Source(name, path.resolve(), fmt))
 
+    paginated_paths = set()
     for name, prefix, variable, subdirs in [
         ('codex', '.codex', 'CODEX_HOME', ('sessions', 'archived_sessions', 'projects')),
         ('claude', '.claude', 'CLAUDE_CONFIG_DIR', ('projects',)),
@@ -60,6 +65,20 @@ def discover(home=None, environ=None):
         if name == 'codex':
             roots.extend(home.glob('.openclaw/agents/*/agent/codex-home'))
         for root in roots:
+            if name == 'codex':
+                databases = sorted(root.glob('state_[0-9]*.sqlite'))
+                if root.joinpath('state_5.sqlite').exists():
+                    databases = [root / 'state_5.sqlite']
+                if not databases:
+                    databases = sorted(root.glob('thread_history_[0-9]*.sqlite'))
+                for database in databases:
+                    found[str(database.resolve())] = Source(name, database.resolve(), 'codex-sqlite')
+                if databases:
+                    try:
+                        paginated_paths.update(paginated_rollout_paths(root))
+                    except (OSError, ValueError, sqlite3.Error):
+                        # Keep the source: extraction records the failure in its manifest.
+                        pass
             for subdir in subdirs:
                 add(name, root / subdir, '**/chat_history.jsonl' if name == 'grok' else '**/*.jsonl', 'jsonl')
     for name, root, pattern in [
@@ -86,7 +105,9 @@ def discover(home=None, environ=None):
     add('slate', data / 'slate/storage/session', '**/*.json', 'opencode-json')
     add('antigravity', home / '.gemini/antigravity/conversations', '*.db', 'sqlite')
     add('antigravity', home / '.gemini/antigravity/conversations', '*.pb', 'opaque')
-    return sorted(found.values(), key=lambda s: (s.harness, str(s.path)))
+    sources = [Source(s.harness, s.path, 'codex-jsonl-raw')
+               if s.format == 'jsonl' and str(s.path) in paginated_paths else s for s in found.values()]
+    return sorted(sources, key=lambda s: (s.harness, str(s.path)))
 
 
 def installed():
