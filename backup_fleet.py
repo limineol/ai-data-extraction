@@ -49,6 +49,8 @@ def worker(collect_latest, allow_archive_only):
 
 def verify_snapshot(directory, allow_archive_only=False, max_age_hours=None):
     manifest = json.loads((directory / 'manifest.json').read_text())
+    if manifest.get('version') != 2:
+        raise ValueError('Snapshot requires the paginated-history extractor; update this host and rerun')
     if max_age_hours is not None:
         created = datetime.strptime(manifest['created_at'], '%Y%m%dT%H%M%S.%fZ').replace(tzinfo=timezone.utc)
         age = (datetime.now(timezone.utc) - created).total_seconds()
@@ -103,7 +105,9 @@ def collect_host(host, destination, collect_latest, allow_archive_only, log):
     if host == 'nexus':
         command = [sys.executable, str(Path(__file__).resolve()), *flags]
     else:
-        remote = 'python3 "$HOME/Projects/ai-data-extraction/backup_fleet.py" ' + shlex.join(flags)
+        remote = ('if [ -x /opt/homebrew/bin/python3 ]; then backup_python=/opt/homebrew/bin/python3; '
+                  'else backup_python=python3; fi; '
+                  '"$backup_python" "$HOME/Projects/ai-data-extraction/backup_fleet.py" ' + shlex.join(flags))
         command = ['ssh', *SSH_OPTIONS, '--', host, remote]
     completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=log, text=True, timeout=6000, check=True)
     payloads = [line[len(RESULT_PREFIX):] for line in completed.stdout.splitlines() if line.startswith(RESULT_PREFIX)]

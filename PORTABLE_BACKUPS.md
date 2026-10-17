@@ -25,7 +25,7 @@ sanitized training datasets. Nothing is uploaded or deleted.
 
 | Harness | Local storage | Support |
 | --- | --- | --- |
-| Codex | `$CODEX_HOME`, `~/.codex*`; active and archived rollouts | Response items, tool calls/results, legacy event messages; raw events retained |
+| Codex | `$CODEX_HOME`, `~/.codex*`; active and archived rollouts, `state_5.sqlite` + `thread_history_1.sqlite` | Paginated turns/items/realtime history plus response items, tool calls/results, legacy event messages; raw events retained |
 | Claude Code | `$CLAUDE_CONFIG_DIR`, `~/.claude*` projects | Nested subagents and full message content |
 | Grok Build | `~/.grok*/sessions/**/chat_history.jsonl` | Messages, reasoning, tools |
 | Factory Droid | `~/.factory/sessions/**/*.jsonl` | Message envelopes and raw session events |
@@ -104,7 +104,8 @@ Install **one** cron entry on Nexus, with absolute paths to Python and the check
 This runs at 09:15 on the first of each month in Nexus's local timezone. Nexus
 must be awake at that time; cron does not catch up after downtime. Vector and
 Forge must be reachable over SSH. OS file locks prevent overlapping fleet jobs
-and overlapping per-host extraction. No auto-update or remote code deployment
+and overlapping per-host extraction. The collector requires manifest version 2, rejecting older extractors that cannot
+see paginated Codex history. No auto-update or remote code deployment
 occurs in the scheduled job. Deploy code updates deliberately to all hosts.
 
 `--allow-archive-only` accepts the explicit Antigravity protobuf limitation;
@@ -121,7 +122,7 @@ Same-disk local archives do not protect against disk loss.
 
 ## Cleanup proposal — approval required
 
-Every run writes `cleanup-candidates.json`. The starting proposal is 90 days of
+Every run writes `cleanup-candidates.json`. The default report threshold is 60 days of
 inactivity followed by 30 days of quarantine. This is a proposal, not an enabled
 deletion policy. The report lists old session-store files and registered
 worktrees found through direct repositories in `~/Projects`.
@@ -133,6 +134,42 @@ Active/pinned sessions, unknown state and undecoded formats must remain protecte
 Harness-native deletion, fresh remote refs and a verified complete archive are
 prerequisites for a future cleanup implementation. This version has no deletion
 or quarantine code.
+
+## Codex paginated history and quarantine planning
+
+The extractor reads committed WAL data from both Codex databases in read-only
+transactions. Raw archives preserve thread metadata, spawn edges, dynamic tools,
+turns, items, projection state, and realtime events. Normalized conversations
+retain complete item payloads, ordering, turn IDs, and a per-thread history digest.
+Surviving migrated JSONL files are still archived as raw records, without
+duplicating their normalized conversations. Missing or
+unknown database versions fail visibly. Orphan history rows are preserved and
+protected from cleanup. Use a current SQLite runtime if a host cannot open a WAL
+store read-only; the fleet runner prefers Homebrew Python on Macs when available.
+
+To create a **read-only** quarantine plan from an explicit backup:
+
+```sh
+python3 codex_cleanup.py --backup /private/backups/RUN --output /private/plan.json
+```
+
+The planner verifies both archive files and compares current per-thread history
+against the backed-up digests. It requires at least 60 days of inactivity, known
+pin/archive flags, completed turns, and backed-up history for every affected
+descendant, including archived descendants that native archive may stop. Unknown state, missing graph members, cycles, and protected
+children prevent a parent from being selected. `--protected-ids` accepts a JSON
+list of additional pinned or active IDs from the app.
+
+A plan is not an archive command or an authorization token. Before acting, confirm
+the off-device copy, check every `runtime_check` chat's current runtime and pin state (including archived
+descendants), and recompute the plan. Check each root's live runtime subtree and
+abort if it contains IDs outside `runtime_check`. Resolve `unmatched_protected_ids`
+before acting; do not assume an unknown protected ID belongs to another host. Codex's native archive operation also archives descendants.
+Afterward, verify history digests and archive flags and record a recovery ledger
+with a minimum 30-day quarantine. Separate metadata and history WAL transactions
+are not an atomic cross-database snapshot; fresh checks are required. This runner
+never archives, edits live databases, or permanently deletes history. Legacy
+JSONL cleanup and other harnesses remain report-only.
 
 ## Regular ChatGPT and Claude chats
 
